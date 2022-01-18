@@ -155,8 +155,15 @@ def scoreGuessEntropy(wordList,guess):
     
     return -sum(np.multiply(binProbs,np.nan_to_num(np.log2(binProbsPos))))
 
+#Fuction that scores all the entropies in the given word list - cheap version that only considers candidate targets (consistent with preceeding clues) as possible guesses
 def scoreAllEntropies(letterStore):
     entropies = np.array([scoreGuessEntropy(letterStore,letterStore[i,:]) for i in range(np.size(letterStore,0))])
+    
+    return np.sort(entropies), np.argsort(entropies)
+
+#Function that scores all the entropies in the given word list - expensive version that considers the entire starting word list as possible guesses
+def scoreAllEntropiesExpensive(fullLetterStore,subLetterStore):
+    entropies = np.array([scoreGuessEntropy(subLetterStore,fullLetterStore[i,:]) for i in range(np.size(fullLetterStore,0))])
     
     return np.sort(entropies), np.argsort(entropies)
 
@@ -209,6 +216,18 @@ def runGuessCycleAuto(guess,tgt,letterStore,letterProbs):
         
         return letterStore, entropyInds[freqScores.argmax() + firstInd]
     
+def runGuessCycleAutoExpensive(guess,tgt,subLetterStore,fullLetterStore):
+    guessLine = word2line(guess)
+    tgtLine = word2line(tgt)
+    
+    #Narrow down the word list based on guess
+    subLetterStore = narrowWordList(guessLine,scoreGuess(tgtLine,guessLine),subLetterStore)
+    
+    #Find the best and worst-scoring candidates
+    [entropyVals,entropyInds] = scoreAllEntropiesExpensive(fullLetterStore,subLetterStore)
+    
+    return subLetterStore, entropyInds[-1]
+    
 #Function that calculates how long the algorithm takes to guess a given target
 def evalGuessingTime(tgt,letterStore,letterProbs):
     
@@ -224,24 +243,77 @@ def evalGuessingTime(tgt,letterStore,letterProbs):
     
     return guessCnt
 
+def evalGuessingTimeExpensive(tgt,letterStore):
+    
+    guessCnt = 1
+    guess = 'tares' #The optimal initial guess
+    
+    subLetterStore = letterStore
+    
+    scoreStore = np.zeros((6,5))
+    scoreStore[0,:] = scoreGuess(word2line(tgt),word2line(guess)) + 1
+    
+    while guess != tgt:
+        guessCnt += 1
+        
+        subLetterStore, selectInd = runGuessCycleAutoExpensive(guess,tgt,subLetterStore,letterStore)
+        
+        #If search space is 1 or 2 targets long, quickest just to (randomly) choose
+        if np.size(subLetterStore,0) < 3:
+            guess = line2word(subLetterStore[0,:])
+        else:
+            guess = line2word(letterStore[selectInd,:])
+        
+        scoreStore[guessCnt-1,:] = scoreGuess(word2line(tgt),word2line(guess)) + 1
+    
+    return guessCnt, scoreStore
+
 #Function that evaluates the guessing time for many random targets
 def calcGuessTimeDist(noSamples):
     letterStoreInit = getData()
     tgtStore = getTgts()
     
-    letterProbs = getLetterFrequencies(letterStoreInit)
+    #letterProbs = getLetterFrequencies(letterStoreInit)
     
     sampleList = np.random.choice(np.size(tgtStore,0), size=noSamples, replace=False)
     
     calcTimes = np.zeros((noSamples,1))
+    scoreSet = np.zeros((6,5,noSamples))
     for i in range(noSamples):
         currTgt = line2word(tgtStore[sampleList[i],:])
         letterStoreCpy = letterStoreInit
-        calcTimes[i] = evalGuessingTime(currTgt,letterStoreCpy,letterProbs)
+        calcTimes[i],scoreSet[:,:,i] = evalGuessingTimeExpensive(currTgt,letterStoreCpy)
         
         print('Time was: ' + str(calcTimes[i]) + '. Percentage complete: ' + str(i*100/noSamples))
     
-    return calcTimes
+    return calcTimes,scoreSet
+
+#Function that renders a large collection of score matrices
+def renderScoreSet(scoreSet,noCols):
+    greenCol = [83/255,141/255,78/255]
+    yelCol = [181/255,159/255,59/255]
+    grayCol = [58/255,58/255,58/255]
+    
+    noSamps = np.size(scoreSet,2)
+    noRows = noSamps // noCols + ((noSamps % noCols) > 0)
+    
+    fullImg = np.zeros((noRows*8,noCols*7,3))
+    
+    for i in range(noSamps):
+        thisScores = scoreSet[:,:,i]
+        
+        cInd = i % noCols
+        rInd = i // noCols
+        
+        xOff = cInd*7 + 1
+        yOff = rInd*8 + 1
+        
+        for c in range(3):
+            fullImg[yOff:yOff+6,xOff:xOff+5,c] += (thisScores == 1)*grayCol[c]
+            fullImg[yOff:yOff+6,xOff:xOff+5,c] += (thisScores == 2)*yelCol[c]
+            fullImg[yOff:yOff+6,xOff:xOff+5,c] += (thisScores == 3)*greenCol[c]
+    
+    return fullImg
 
 ###### Manual IO code ######
 
@@ -259,12 +331,47 @@ def runGuessCycleManual(guess,outcome,letterStore):
     
     return letterStore
 
+#Function that runs a guess cycle, while outputing user-readable data for guess selection
+def runGuessCycleManualExpensive(guess,outcome,subLetterStore,fullLetterStore):
+    guessLine = word2line(guess)
+    
+    #Narrow down the word list based on guess
+    subLetterStore = narrowWordList(guessLine,outcome,subLetterStore)
+    
+    #Find the best and worst-scoring candidates
+    [entropyVals,entropyInds] = scoreAllEntropiesExpensive(fullLetterStore,subLetterStore)
+    
+    summariseExpensiveChoices(subLetterStore,fullLetterStore,entropyVals,entropyInds)
+    
+    return subLetterStore
+
 #Function that summarises entropy statistics in user-readable fashion
 def summariseChoices(letterStore,entropyVals,entropyInds):
     showDepth = min((10,np.size(letterStore,0)))
     print('Top ' + str(showDepth) + ' scoring candidates after this guess, with corresponding entropy:')
     for i in range(1,showDepth+1):
         print(line2word(letterStore[entropyInds[-i],:]) + ' | ' + str(entropyVals[-i]))
+        
+    #Function that summarises entropy statistics in user-readable fashion
+def summariseExpensiveChoices(subLetterStore,fullLetterStore,entropyVals,entropyInds):
+    if np.size(subLetterStore,0) == 1:
+        print('Only one possibility left: ' + line2word(subLetterStore[0,:]))
+    elif np.size(subLetterStore,0) == 2:
+        print('Two possibilities left; average guess time is minimised by randomly guessing between the two:')
+        print(line2word(subLetterStore[0,:]))
+        print(line2word(subLetterStore[1,:]))
+    else:
+        print('Search space now ' + str(np.size(subLetterStore,0)) + ' words long:')
+        if np.size(subLetterStore,0) < 10:
+            for i in range(np.size(subLetterStore,0)):
+                print(line2word(subLetterStore[i,:]))
+        else:
+            print('<Too many to show>')
+        showDepth = 10
+        print(' ')
+        print('Top ' + str(showDepth) + ' scoring candidates after this guess, with corresponding entropy:')
+        for i in range(1,showDepth+1):
+            print(line2word(fullLetterStore[entropyInds[-i],:]) + ' | ' + str(entropyVals[-i]))
 
 #Main manual mode program
 def manualModeProgram():
@@ -281,7 +388,7 @@ def manualModeProgram():
         validIn = validateScoreInput(outcome1)
     
     #Narrow down the word list based on first guess
-    letterStore = runGuessCycleManual('tares',np.array(eval(outcome1)),letterStore)
+    subLetterStore = runGuessCycleManualExpensive('tares',np.array(eval(outcome1)),letterStore,letterStore)
     
     while True:
         print('Please input the word that you selected, or q to quit:')
@@ -308,7 +415,10 @@ def manualModeProgram():
             validIn = validateScoreInput(outcomeNew)
         
         #Narrow down the word list based on new guess
-        letterStore = runGuessCycleManual(wordIn,np.array(eval(outcomeNew)),letterStore)
+        subLetterStore = runGuessCycleManualExpensive(wordIn,np.array(eval(outcomeNew)),subLetterStore,letterStore)
+        
+        if np.size(subLetterStore,0) < 3:
+            return None
         
 #Function that validates the user input from 
 def validateScoreInput(inStr):
